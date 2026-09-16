@@ -1,0 +1,14 @@
+# ESP-IDF build output
+build/
+build.minGW-backup/
+
+# Local ESP-IDF installation
+esp-idf/
+
+# VS Code local settings
+.vscode/
+
+# Generated files
+sdkconfig.old
+flash_result.log
+project_description.json
