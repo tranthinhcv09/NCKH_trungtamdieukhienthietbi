@@ -11,10 +11,10 @@ Danh sách câu lệnh:
   8. off light
 
 Sao kê đồ dùng: 635k
-  - esp32 28pin (củ)
-    số lượng: 1
+  - esp32 28pin (củ) 
+    số lượng: 1 
     giá: 75k/cái
-  - esp32s3 n16r8
+  - esp32s3 n16r8 
     số lượng: 2
     giá: 195k/cái
   - esp32s3 n16r8
