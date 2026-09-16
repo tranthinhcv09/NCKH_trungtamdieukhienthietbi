@@ -1,176 +1,193 @@
-// ============================================================
-//  esp32.ino – ESP32 (Arduino) – Điều khiển LED RGB & NVS Config
-//  Đã fix: Lỗi đệ quy nút bấm GPIO0 khi thoát ESP-NOW sang WiFi
-// ============================================================
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <esp_now.h>
 #include <esp_arduino_version.h>
-#include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include <Preferences.h>
 
-// ===== NVS =====
-Preferences preferences;
-
-// ===== PIN & THỜI GIAN GIỮ NÚT =====
-#define LIGHT_BUTTON_PIN   4      // Chân nút Bật/Tắt đèn
-#define ESP_NOW_BUTTON_PIN 0      // Chân nút Cấu hình / Reset
-
-#define LIGHT_HOLD_MS      800    // GPIO4: Phải giữ >= 800ms mới Bật/Tắt đèn
-#define ESPNOW_HOLD_MS     800    // GPIO0: Giữ >= 800ms mới vào/thoát ESP-NOW
-#define CLEAR_HOLD_MS      5000   // GPIO0: Giữ >= 5000ms (5s) để Xóa NVS
+#define LIGHT_BUTTON_PIN   0
+#define LIGHT_HOLD_MS      300
 
 #define RED_PIN            18
 #define GREEN_PIN          19
 #define BLUE_PIN           21
 
-#define WIFI_CONNECT_MAX_TRIES 10
+#define ESPNOW_CHANNEL 10
 
-// ===== TOPICS MQTT =====
-const char* sub_topic = "esp32/rgb"; // nhận
-const char* pub_topic = "esp32/send"; //gửi
+#define MSG_TYPE_TEXT 0
+typedef struct {
+    uint8_t type;
+    char    text[240];
+} TextMessagePacket;
 
-// ===== BIẾN TRẠNG THÁI MÀU =====
-uint8_t R = 0;
-uint8_t G = 255;
-uint8_t B = 255;
+uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-bool lastTouchState = false;   // true = đèn đang BẬT
+// ===== TRẠNG THÁI MÀU =====
+uint8_t R = 0, G = 255, B = 255;
+bool lastTouchState = false;
 
-// ===== CẤU HÌNH MẠNG =====
-char ssid[33]       = "";
-char password[65]   = "";
-char mqttServer[40] = "";
-const char* mqtt_server = mqttServer;
-
-// ===== ESP-NOW =====
-struct WifiCredentialsMessage {
-    char ssid[33];
-    char password[65];
-    char mqtt_server[40];
-};
-
-bool espNowMode           = false;   // Đang ở chế độ ESP-NOW
-bool espNowConfigReceived = false;   // Vừa nhận gói tin mới
-bool espNowConfigApplied  = false;   // Đã nhận thành công
-WifiCredentialsMessage espNowConfig = {};
-
-// ===== MQTT CLIENT =====
-WiFiClient  espClient;
-PubSubClient mqttClient(espClient);
+// ===== Nhận ESP-NOW: copy vào buffer, xử lý ở loop() (không xử lý
+// nặng trực tiếp trong callback, tránh gọi esp_now_send() lồng trong
+// context nhận, có thể gây treo/không ổn định) =====
+volatile bool pendingTextAvailable = false;
+char          pendingTextBuffer[240];
 
 // ===== PROTOTYPES =====
-void connectWiFi();
 void setColor(uint8_t r, uint8_t g, uint8_t b);
-void toggleEspNowMode();
+bool isDarkColor(uint8_t r, uint8_t g, uint8_t b);
 void handleTouchTap();
-void updateEspNowIndicator();
 void checkLightButton();
-void checkEspNowButton();
-void checkAllButtons();
-void loadStoredCredentials();
-void clearAllCredentials();
+void processCommand(const char* commandStr);
+bool sendEspNowText(const char* text);
+void setupEspNow();
 
 // ============================================================
-// NVS – Lưu / Nạp cấu hình
-// ============================================================
-void loadStoredCredentials() {
-    preferences.begin("config", true);
-    String savedSsid = preferences.getString("ssid", "");
-    String savedPass = preferences.getString("pass", "");
-    String savedMqtt = preferences.getString("mqtt", "");
-    preferences.end();
-
-    if (savedSsid.length() > 0) {
-        savedSsid.toCharArray(ssid, sizeof(ssid));
-        savedPass.toCharArray(password, sizeof(password));
-        savedMqtt.toCharArray(mqttServer, sizeof(mqttServer));
-        Serial.println("📦 Đã nạp cấu hình từ NVS:");
-        Serial.println("   SSID: " + String(ssid));
-        Serial.println("   MQTT: " + String(mqttServer));
-    } else {
-        Serial.println("⚠️ Chưa có cấu hình lưu trong NVS - tự vào chế độ ESP-NOW.");
-    }
-}
-
-void clearAllCredentials() {
-    if (espNowMode) {
-        esp_now_deinit();
-        espNowMode = false;
-    } else {
-        WiFi.disconnect(true);
-    }
-
-    preferences.begin("config", false);
-    preferences.clear();
-    preferences.end();
-
-    memset(ssid, 0, sizeof(ssid));
-    memset(password, 0, sizeof(password));
-    memset(mqttServer, 0, sizeof(mqttServer));
-
-    Serial.println("🗑️ [NVS] Đã xóa sạch cấu hình!");
-
-    for (int i = 0; i < 3; i++) {
-        setColor(255, 0, 0);
-        delay(150);
-        setColor(0, 0, 0);
-        delay(150);
-    }
-
-    toggleEspNowMode();
-}
-
-// ============================================================
-// ESP-NOW – Callback nhận cấu hình
+// ESP-NOW CALLBACKS
 // ============================================================
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-void onEspNowDataRecv(const esp_now_recv_info_t*, const uint8_t* data, int length) {
+void onEspNowDataRecv(const esp_now_recv_info_t*, const uint8_t* data, int len) {
 #else
-void onEspNowDataRecv(const uint8_t*, const uint8_t* data, int length) {
+void onEspNowDataRecv(const uint8_t*, const uint8_t* data, int len) {
 #endif
-    if (length != sizeof(WifiCredentialsMessage)) return;
-    memcpy(&espNowConfig, data, sizeof(espNowConfig));
-    espNowConfigReceived = true;
+    if (len != sizeof(TextMessagePacket)) return;
+    if (data[0] != MSG_TYPE_TEXT) return;
+
+    TextMessagePacket pkt;
+    memcpy(&pkt, data, sizeof(pkt));
+    strncpy(pendingTextBuffer, pkt.text, sizeof(pendingTextBuffer) - 1);
+    pendingTextBuffer[sizeof(pendingTextBuffer) - 1] = '\0';
+    pendingTextAvailable = true;
 }
 
-bool startEspNowConfig() {
+// ============================================================
+// KHỞI TẠO ESP-NOW THUẦN (KHÔNG WIFI, KHÔNG MQTT)
+// ============================================================
+void setupEspNow() {
+    // Cần WiFi.mode(WIFI_STA) để có radio, nhưng KHÔNG kết nối AP nào.
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect(false, false);
+    delay(100);
+
+    esp_err_t chErr = esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("📡 Ép kênh RF sang Kênh %d: %s\n",
+                  ESPNOW_CHANNEL, (chErr == ESP_OK) ? "OK" : "LỖI");
+
     if (esp_now_init() != ESP_OK) {
-        Serial.println("ESP-NOW init failed");
-        return false;
+        Serial.println("❌ ESP-NOW Init thất bại!");
+        return;
     }
-    espNowConfigReceived = false;
+
     esp_now_register_recv_cb(onEspNowDataRecv);
-    Serial.println("ESP-NOW config mode enabled; waiting for S3...");
-    return true;
-}
 
-void applyEspNowConfig() {
-    espNowConfig.ssid[sizeof(espNowConfig.ssid) - 1]               = '\0';
-    espNowConfig.password[sizeof(espNowConfig.password) - 1]       = '\0';
-    espNowConfig.mqtt_server[sizeof(espNowConfig.mqtt_server) - 1] = '\0';
-    
-    strncpy(ssid,       espNowConfig.ssid,        sizeof(ssid) - 1);
-    strncpy(password,   espNowConfig.password,    sizeof(password) - 1);
-    strncpy(mqttServer, espNowConfig.mqtt_server, sizeof(mqttServer) - 1);
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, broadcastMac, 6);
+    peerInfo.channel = 0; // 0 = dùng kênh RF hiện tại của radio, cho phép
+                          // gửi trên nhiều kênh khác nhau khi quét kênh
+    peerInfo.encrypt = false;
 
-    preferences.begin("config", false);
-    preferences.putString("ssid", ssid);
-    preferences.putString("pass", password);
-    preferences.putString("mqtt", mqttServer);
-    preferences.end();
+    if (!esp_now_is_peer_exist(broadcastMac)) {
+        esp_now_add_peer(&peerInfo);
+    }
 
-    Serial.println("\n🎉 [ESP-NOW] Đã nhận cấu hình mới & Lưu NVS!");
-    Serial.println("   SSID: "        + String(ssid));
-    Serial.println("   MQTT server: " + String(mqttServer));
-    Serial.println("👉 Nhấn giữ GPIO0 (>=800ms) LẦN NỮA để THOÁT ESP-NOW và kết nối WiFi!");
+    Serial.printf("✅ ESP-NOW sẵn sàng ở Kênh %d | MAC: %s\n",
+                  ESPNOW_CHANNEL, WiFi.macAddress().c_str());
 }
 
 // ============================================================
-// XỬ LÝ NÚT BẤM (ĐÃ FIX LỖI ĐỆ QUY)
+// GỬI TEXT QUA ESP-NOW (đúng định dạng TextMessagePacket của hub)
 // ============================================================
+// Gửi bằng cách QUÉT QUA TẤT CẢ KÊNH 1–13. Lý do: kênh RF của hub không cố
+// định (bám theo mạng WiFi mà hub đang kết nối), nên ta không biết chắc hub
+// đang ở kênh nào tại thời điểm gửi. Gửi trên mọi kênh đảm bảo luôn "chạm"
+// đúng kênh hub đang lắng nghe, dù không dùng chung kênh cố định với hub.
+// Lưu ý: gói tin là broadcast nên KHÔNG có ACK thật sự để xác nhận hub đã
+// nhận — hàm này chỉ đảm bảo đã phát trên mọi kênh, không đảm bảo hub nhận.
+bool sendEspNowText(const char* text) {
+    TextMessagePacket pkt;
+    pkt.type = MSG_TYPE_TEXT;
+    strncpy(pkt.text, text, sizeof(pkt.text) - 1);
+    pkt.text[sizeof(pkt.text) - 1] = '\0';
+
+    bool anySendOk = false;
+
+    for (uint8_t ch = 1; ch <= 13; ch++) {
+        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        delay(15); // để radio ổn định trên kênh mới
+
+        esp_err_t result = esp_now_send(broadcastMac, (uint8_t*)&pkt, sizeof(pkt));
+        if (result == ESP_OK) anySendOk = true;
+
+        delay(15); // chờ gói tin thực sự phát xong trước khi đổi kênh tiếp
+    }
+
+    // Quay lại kênh cố định để tiếp tục LẮNG NGHE bình thường
+    esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+    Serial.printf("📡 [ESP-NOW] Đã quét gửi qua 13 kênh: %s (%s)\n",
+                  text, anySendOk ? "OK" : "LỖI GỬI");
+    return anySendOk;
+}
+
+// ============================================================
+// XỬ LÝ LỆNH NHẬN ĐƯỢC
+// ============================================================
+void processCommand(const char* commandStr) {
+    String message = String(commandStr);
+    Serial.printf("\n📩 [ESP-NOW IN]: %s\n", commandStr);
+
+    if (message == "OFFRGB") {
+        setColor(0, 0, 0);
+        lastTouchState = false;
+        return;
+    } else if (message == "ONRGB") {
+        setColor(R, G, B);
+        lastTouchState = true;
+        return;
+    }
+
+    StaticJsonDocument<256> doc;
+    DeserializationError err = deserializeJson(doc, message);
+
+    if (!err && doc.containsKey("r") && doc.containsKey("g") && doc.containsKey("b")) {
+        R = doc["r"].as<uint8_t>();
+        G = doc["g"].as<uint8_t>();
+        B = doc["b"].as<uint8_t>();
+
+        Serial.printf("🎨 Đổi màu LED: R=%d, G=%d, B=%d\n", R, G, B);
+        setColor(R, G, B);
+        lastTouchState = !isDarkColor(R, G, B);
+
+        String feedback = "Đã đổi màu: R" + String(R) + " G" + String(G) + " B" + String(B);
+        sendEspNowText(feedback.c_str());
+    }
+}
+
+// ============================================================
+// LED & NÚT BẤM
+// ============================================================
+bool isDarkColor(uint8_t r, uint8_t g, uint8_t b) { return ((int)r + g + b) < 50; }
+
+void setColor(uint8_t r, uint8_t g, uint8_t b) {
+    ledcWrite(RED_PIN,   r);
+    ledcWrite(GREEN_PIN, g);
+    ledcWrite(BLUE_PIN,  b);
+}
+
+void handleTouchTap() {
+    if (!lastTouchState) {
+        Serial.println("👉 BẬT đèn...");
+        if (isDarkColor(R, G, B)) { R = 0; G = 255; B = 255; }
+        setColor(R, G, B);
+        sendEspNowText("to_on");
+        lastTouchState = true;
+    } else {
+        Serial.println("👉 TẮT đèn...");
+        setColor(0, 0, 0);
+        sendEspNowText("to_off");
+        lastTouchState = false;
+    }
+}
+
 void checkLightButton() {
     static bool lastState = HIGH;
     static unsigned long pressStartTime = 0;
@@ -188,270 +205,37 @@ void checkLightButton() {
     if (currentState == LOW && !handled && (millis() - pressStartTime >= LIGHT_HOLD_MS)) {
         handled = true;
         lastState = currentState;
-        if (!espNowMode) {
-            handleTouchTap();
-        }
+        handleTouchTap();
         return;
     }
 
     lastState = currentState;
 }
 
-void checkEspNowButton() {
-    static bool lastState = HIGH;
-    static unsigned long pressStartTime = 0;
-    static bool clearHandled = false;
-
-    bool currentState = digitalRead(ESP_NOW_BUTTON_PIN);
-
-    // Cánh xuống - Vừa nhấn nút
-    if (lastState == HIGH && currentState == LOW) {
-        pressStartTime = millis();
-        clearHandled = false;
-        lastState = currentState;
-        return;
-    }
-
-    // Giữ >= 5 giây: Xóa NVS
-    if (currentState == LOW && !clearHandled && (millis() - pressStartTime >= CLEAR_HOLD_MS)) {
-        clearHandled = true;
-        lastState = currentState;
-        clearAllCredentials();
-        return;
-    }
-
-    // Cánh lên - Vừa thả nút ra (ĐIỂM SỬA CHÍNH)
-    if (lastState == LOW && currentState == HIGH) {
-        unsigned long heldFor = millis() - pressStartTime;
-        
-        // Cập nhật lastState NGAY LẬP TỨC để tránh đệ quy khi connectWiFi() gọi lại hàm này
-        lastState = currentState; 
-
-        if (!clearHandled) {
-            if (heldFor >= ESPNOW_HOLD_MS) {
-                toggleEspNowMode();
-            }
-        }
-        return;
-    }
-
-    lastState = currentState;
-}
-
-void checkAllButtons() {
-    checkLightButton();
-    checkEspNowButton();
-}
-
-void toggleEspNowMode() {
-    espNowMode = !espNowMode;
-    if (espNowMode) {
-        espNowConfigApplied = false;
-        if (!startEspNowConfig()) {
-            espNowMode = false;
-            Serial.println("!!! Khong vao duoc che do ESP-NOW");
-        } else {
-            Serial.println("== ĐÃ VÀO CHẾ ĐỘ ESP-NOW (đèn nhấp nháy XANH DƯƠNG) ==");
-        }
-    } else {
-        esp_now_deinit();
-        espNowConfigApplied = false;
-        Serial.println("== ĐÃ THOÁT CHẾ ĐỘ ESP-NOW, CHUYỂN SANG KẾT NỐI WIFI ==");
-        connectWiFi();
-        mqttClient.setServer(mqtt_server, 1883);
-        setColor(lastTouchState ? R : 0, lastTouchState ? G : 0, lastTouchState ? B : 0);
-    }
-}
-
 // ============================================================
-// LED & Color Helpers
-// ============================================================
-bool isDarkColor(uint8_t r, uint8_t g, uint8_t b) {
-    return ((int)r + g + b) < 50;
-}
-
-void setColor(uint8_t r, uint8_t g, uint8_t b) {
-    ledcWrite(RED_PIN,   r);
-    ledcWrite(GREEN_PIN, g);
-    ledcWrite(BLUE_PIN,  b);
-}
-
-void handleTouchTap() {
-    if (!lastTouchState) {
-        Serial.println("👉 [GPIO4 >= 800ms] BẬT đèn...");
-        if (isDarkColor(R, G, B)) {
-            R = 0; G = 255; B = 255;
-        }
-        setColor(R, G, B);
-        if (mqttClient.connected()) mqttClient.publish(pub_topic, "to_on");
-        lastTouchState = true;
-    } else {
-        Serial.println("👉 [GPIO4 >= 800ms] TẮT đèn...");
-        setColor(0, 0, 0);
-        if (mqttClient.connected()) mqttClient.publish(pub_topic, "to_off");
-        lastTouchState = false;
-    }
-}
-
-void updateEspNowIndicator() {
-    static unsigned long lastBlink = 0;
-    static bool blinkOn = false;
-
-    unsigned long interval = espNowConfigApplied ? 500 : 250;
-
-    if (millis() - lastBlink < interval) return;
-
-    lastBlink = millis();
-    blinkOn = !blinkOn;
-
-    if (!blinkOn) {
-        setColor(0, 0, 0);
-    } else {
-        if (espNowConfigApplied) {
-            setColor(0, 255, 0);   // Xanh lá (Đã nhận xong)
-        } else {
-            setColor(0, 150, 255); // Xanh dương (Đang chờ S3)
-        }
-    }
-}
-
-// ============================================================
-// MQTT Callback
-// ============================================================
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    char msg[length + 1];
-    memcpy(msg, payload, length);
-    msg[length] = '\0';
-    String message = String(msg);
-
-    Serial.println("\n📩 MQTT in: " + message);
-
-    if (message == "OFFRGB") {
-        setColor(0, 0, 0);
-        lastTouchState = false;
-        return;
-    } else if (message == "ONRGB") {
-        setColor(R, G, B);
-        lastTouchState = true;
-        return;
-    } else if (message == "CLEAR_CONFIG") {
-        mqttClient.publish(pub_topic, "Config NVS erased! Resetting...");
-        clearAllCredentials();
-        return;
-    }
-
-    StaticJsonDocument<256> doc;
-    DeserializationError err = deserializeJson(doc, message);
-
-    if (!err && doc.containsKey("r") && doc.containsKey("g") && doc.containsKey("b")) {
-        R = doc["r"].as<uint8_t>();
-        G = doc["g"].as<uint8_t>();
-        B = doc["b"].as<uint8_t>();
-
-        Serial.printf("🎨 Đổi màu LED: R=%d, G=%d, B=%d\n", R, G, B);
-        setColor(R, G, B);
-        lastTouchState = !isDarkColor(R, G, B);
-
-        String feedback = "Đã đổi màu: R" + String(R) + " G" + String(G) + " B" + String(B);
-        mqttClient.publish(pub_topic, feedback.c_str());
-    }
-}
-
-// ============================================================
-// WiFi & MQTT
-// ============================================================
-void connectWiFi() {
-    if (strlen(ssid) == 0) {
-        Serial.println("⚠️ Chưa có SSID! Tự động bật ESP-NOW chờ cấu hình...");
-        if (!espNowMode) toggleEspNowMode();
-        return;
-    }
-
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
-    Serial.print("🔌 Connecting WiFi: ");
-    Serial.println(ssid);
-
-    int tryCount = 0;
-    while (WiFi.status() != WL_CONNECTED) {
-        checkAllButtons();
-        if (espNowMode) {
-            Serial.println("\n⏸️ Đã vào chế độ ESP-NOW, dừng chờ WiFi");
-            return;
-        }
-
-        Serial.print(".");
-        tryCount++;
-        delay(500);
-
-        if (tryCount >= WIFI_CONNECT_MAX_TRIES) {
-            Serial.println();
-            Serial.println("⚠️ Thất bại sau " + String(WIFI_CONNECT_MAX_TRIES) +
-                            " lần thử - TỰ ĐỘNG chuyển sang chế độ chờ ESP-NOW");
-            toggleEspNowMode();
-            return;
-        }
-    }
-    Serial.println("\n✅ WiFi Connected! IP: " + WiFi.localIP().toString());
-    WiFi.setSleep(false);
-}
-
-void reconnectMQTT() {
-    while (!mqttClient.connected()) {
-        Serial.print("🔌 Connecting MQTT...");
-        if (mqttClient.connect("ESP32_28pin_control")) {
-            mqttClient.subscribe(sub_topic, 1);
-            Serial.println("OK!");
-        } else {
-            Serial.print("Failed, rc="); Serial.println(mqttClient.state());
-            delay(2000);
-        }
-    }
-}
-
-// ============================================================
-// SETUP
+// SETUP & LOOP
 // ============================================================
 void setup() {
     Serial.begin(115200);
     delay(2000);
 
     pinMode(LIGHT_BUTTON_PIN, INPUT_PULLUP);
-    pinMode(ESP_NOW_BUTTON_PIN, INPUT_PULLUP);
 
     ledcAttach(RED_PIN,   5000, 8);
     ledcAttach(GREEN_PIN, 5000, 8);
     ledcAttach(BLUE_PIN,  5000, 8);
     setColor(0, 0, 0);
 
-    loadStoredCredentials();
-    connectWiFi();
-
-    mqttClient.setServer(mqtt_server, 1883);
-    mqttClient.setCallback(mqttCallback);
+    setupEspNow();
 }
 
-// ============================================================
-// LOOP
-// ============================================================
 void loop() {
-    checkAllButtons();
+    checkLightButton();
 
-    if (espNowMode) {
-        if (espNowConfigReceived) {
-            applyEspNowConfig();
-            espNowConfigReceived = false;
-            espNowConfigApplied = true;
-        }
-        updateEspNowIndicator();
-        delay(10);
-        return;
+    if (pendingTextAvailable) {
+        pendingTextAvailable = false;
+        processCommand(pendingTextBuffer);
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        if (!mqttClient.connected()) reconnectMQTT();
-        mqttClient.loop();
-    }
-
-    delay(10);
+    delay(1);
 }
