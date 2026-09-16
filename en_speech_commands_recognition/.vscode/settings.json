@@ -1,0 +1,11 @@
+{
+  "idf.portWin": "COM10",
+  "idf.openOcdConfigs": ["board/esp32s3-builtin.cfg"],
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32s3",
+    "IDF_PATH": "D:\\Espressif\\frameworks\\esp-idf-v4.4.8",
+    "IDF_PYTHON_ENV_PATH": "D:\\Espressif\\v5.3\\python_env\\idf4.4_py3.10_env"
+  },
+  "idf.flashType": "JTAG",
+  "idf.currentSetup": "D:\\Espressif\\frameworks\\esp-idf-v4.4.8"
+}

@@ -1,0 +1,104 @@
+D:\Espressif\frameworks\esp-idf-v4.4.8\tools\idf.py:375: DeprecationWarning: 'MultiCommand' is deprecated and will be removed in Click 9.0. Use 'Group' instead.
+  class CLI(click.MultiCommand):
+[1/5] cmd.exe /C "cd /D D:\Espressif\esp-skainet\examples\en_speech_commands_recognition\build\esp-idf\esptool_py && D:\Espressif\v5.3\python_env\idf4.4_py3.10_env\Scripts\python.exe D:/Espressif/frameworks/esp-idf-v4.4.8/components/partition_table/check_sizes.py --offset 0x8000 partition --type app D:/Espressif/esp-skainet/examples/en_speech_commands_recognition/build/partition_table/partition-table.bin D:/Espressif/esp-skainet/examples/en_speech_commands_recognition/build/speech_commands_recognition.bin"
+speech_commands_recognition.bin binary size 0x128060 bytes. Smallest app partition is 0x200000 bytes. 0xd7fa0 bytes (42%) free.
+[2/5] Performing build step for 'bootloader'
+[1/1] cmd.exe /C "cd /D D:\Espressif\esp-skainet\examples\en_speech_commands_recognition\build\bootloader\esp-idf\esptool_py && D:\Espressif\v5.3\python_env\idf4.4_py3.10_env\Scripts\python.exe D:/Espressif/frameworks/esp-idf-v4.4.8/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 D:/Espressif/esp-skainet/examples/en_speech_commands_recognition/build/bootloader/bootloader.bin"
+Bootloader binary size 0x5810 bytes. 0x27f0 bytes (31%) free.
+[2/3] cmd.exe /C "cd /D D:\Espressif\frameworks\esp-idf-v4.4.8\components\esptool_py && D:\CMAKE\bin\cmake.exe -D IDF_PATH="D:/Espressif/frameworks/esp-idf-v4.4.8" -D SERIAL_TOOL="D:/Espressif/v5.3/python_env/idf4.4_py3.10_env/Scripts/python.exe D:/Espressif/frameworks/esp-idf-v4.4.8/components/esptool_py/esptool/esptool.py --chip esp32s3" -D SERIAL_TOOL_ARGS="--before=default_reset --after=hard_reset write_flash @flash_args" -D WORKING_DIRECTORY="D:/Espressif/esp-skainet/examples/en_speech_commands_recognition/build" -P D:/Espressif/frameworks/esp-idf-v4.4.8/components/esptool_py/run_serial_tool.cmake"
+esptool.py esp32s3 -p COM10 -b 460800 --before=default_reset --after=hard_reset write_flash --flash_mode dio --flash_freq 40m --flash_size 16MB 0x0 bootloader/bootloader.bin 0x10000 speech_commands_recognition.bin 0x8000 partition_table/partition-table.bin 0x210000 srmodels/srmodels.bin
+esptool.py v3.3.4-dev
+Serial port COM10
+Connecting...
+Chip is ESP32-S3 (revision v0.2)
+Features: WiFi, BLE
+Crystal is 40MHz
+MAC: dc:b4:d9:09:f3:cc
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00000000 to 0x00005fff...
+Flash will be erased from 0x00010000 to 0x00138fff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+Flash will be erased from 0x00210000 to 0x00257fff...
+Compressed 22544 bytes to 14077...
+Writing at 0x00000000... (100 %)
+Wrote 22544 bytes (14077 compressed) at 0x00000000 in 0.6 seconds (effective 290.1 kbit/s)...
+Hash of data verified.
+Compressed 1212512 bytes to 743345...
+Writing at 0x00010000... (2 %)
+Writing at 0x0001ad16... (4 %)
+Writing at 0x00026378... (6 %)
+Writing at 0x0002ae92... (8 %)
+Writing at 0x00034976... (10 %)
+Writing at 0x0003f9dd... (13 %)
+Writing at 0x0004a099... (15 %)
+Writing at 0x0004f81e... (17 %)
+Writing at 0x000557f3... (19 %)
+Writing at 0x0005b14e... (21 %)
+Writing at 0x000612de... (23 %)
+Writing at 0x00066e7e... (26 %)
+Writing at 0x0006c7eb... (28 %)
+Writing at 0x00071f41... (30 %)
+Writing at 0x000782ff... (32 %)
+Writing at 0x0007d716... (34 %)
+Writing at 0x000849d5... (36 %)
+Writing at 0x0008d544... (39 %)
+Writing at 0x00093586... (41 %)
+Writing at 0x00099842... (43 %)
+Writing at 0x0009f6eb... (45 %)
+Writing at 0x000a5120... (47 %)
+Writing at 0x000aa850... (50 %)
+Writing at 0x000b00bb... (52 %)
+Writing at 0x000b5a58... (54 %)
+Writing at 0x000bb3c1... (56 %)
+Writing at 0x000c0c1e... (58 %)
+Writing at 0x000c6a19... (60 %)
+Writing at 0x000ccbdf... (63 %)
+Writing at 0x000d2715... (65 %)
+Writing at 0x000d78d4... (67 %)
+Writing at 0x000dc85e... (69 %)
+Writing at 0x000e1939... (71 %)
+Writing at 0x000e6cdd... (73 %)
+Writing at 0x000ebfb1... (76 %)
+Writing at 0x000f144b... (78 %)
+Writing at 0x000f707b... (80 %)
+Writing at 0x000fcc07... (82 %)
+Writing at 0x001021ca... (84 %)
+Writing at 0x00107b13... (86 %)
+Writing at 0x0010d76d... (89 %)
+Writing at 0x00116481... (91 %)
+Writing at 0x001244fe... (93 %)
+Writing at 0x0012a70e... (95 %)
+Writing at 0x001303d0... (97 %)
+Writing at 0x001358cd... (100 %)
+Wrote 1212512 bytes (743345 compressed) at 0x00010000 in 17.0 seconds (effective 571.7 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 120...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (120 compressed) at 0x00008000 in 0.1 seconds (effective 454.4 kbit/s)...
+Hash of data verified.
+Compressed 291168 bytes to 176783...
+Writing at 0x00210000... (9 %)
+Writing at 0x002148b6... (18 %)
+Writing at 0x0021d756... (27 %)
+Writing at 0x00223a7f... (36 %)
+Writing at 0x00229c7f... (45 %)
+Writing at 0x0022eca5... (54 %)
+Writing at 0x00234279... (63 %)
+Writing at 0x00239287... (72 %)
+Writing at 0x0023e97d... (81 %)
+Writing at 0x0024aa07... (90 %)
+Writing at 0x00252e99... (100 %)
+Wrote 291168 bytes (176783 compressed) at 0x00210000 in 4.1 seconds (effective 566.6 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...
+Executing action: flash
+Running ninja in directory D:\Espressif\esp-skainet\examples\en_speech_commands_recognition\build
+Executing "ninja flash"...
+Done
