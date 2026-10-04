@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="vi" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Home IoT Dashboard</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  </head>
+  <body>
+    <div class="app-container">
+      <!-- HEADER -->
+      <header class="app-header">
+        <div class="brand-section">
+          <div class="brand-logo">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"
+              ></path>
+            </svg>
+          </div>
+          <div class="brand-info">
+            <h1>Smart Home Dashboard</h1>
+            <p id="currentClock">Đang tải thời gian...</p>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <!-- MQTT Status Badge -->
+          <div
+            id="brokerBadge"
+            class="status-badge connecting"
+            onclick="openModal('mqttModal')"
+            title="Nhấn để cấu hình MQTT"
+          >
+            <span class="status-dot"></span>
+            <span id="brokerStatusText">Đang kết nối...</span>
+          </div>
+
+          <!-- Dark/Light Theme Button -->
+          <button
+            class="btn btn-icon"
+            onclick="toggleTheme()"
+            title="Chuyển chế độ Sáng/Tối"
+          >
+            <span id="themeIcon">🌙</span>
+          </button>
+
+          <!-- Add Room Button -->
+          <button class="btn btn-sm" onclick="openModal('addRoomModal')">
+            <span>+ Phòng</span>
+          </button>
+
+          <!-- Add Device Button -->
+          <button class="btn btn-primary" onclick="openModal('addDeviceModal')">
+            <svg
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M12 4v16m8-8H4"
+              ></path>
+            </svg>
+            <span>Thêm thiết bị</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- QUICK SCENES -->
+      <section class="scenes-section">
+        <div class="section-label">
+          <span>Kịch bản nhanh</span>
+        </div>
+        <div class="scenes-grid">
+          <div class="scene-card" onclick="activateScene('home')">
+            <div class="scene-icon">🏡</div>
+            <div class="scene-info">
+              <h4>Về Nhà</h4>
+              <p>Bật đèn & quạt</p>
+            </div>
+          </div>
+          <div class="scene-card" onclick="activateScene('sleep')">
+            <div class="scene-icon">🌙</div>
+            <div class="scene-info">
+              <h4>Đi Ngủ</h4>
+              <p>Đèn ngủ mờ dịu</p>
+            </div>
+          </div>
+          <div class="scene-card" onclick="activateScene('relax')">
+            <div class="scene-icon">☕</div>
+            <div class="scene-info">
+              <h4>Thư Giãn</h4>
+              <p>Ánh sáng êm dịu</p>
+            </div>
+          </div>
+          <div class="scene-card" onclick="activateScene('all_off')">
+            <div class="scene-icon">⚡</div>
+            <div class="scene-info">
+              <h4>Tắt Toàn Bộ</h4>
+              <p>Tắt hết thiết bị</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ROOMS BAR -->
+      <section>
+        <div class="section-label">
+          <span>Khu vực</span>
+        </div>
+        <div class="rooms-bar">
+          <div class="room-tabs" id="roomTabs">
+            <!-- Dynamic Room Tabs -->
+          </div>
+        </div>
+      </section>
+
+      <!-- DEVICE CARDS GRID -->
+      <main class="devices-grid" id="devicesGrid">
+        <!-- Dynamic Device Cards Rendered via rgb.js -->
+      </main>
+
+      <!-- MQTT & VOICE ACTIVITY CONSOLE -->
+      <section class="activity-console">
+        <div class="console-header" onclick="toggleConsole()">
+          <h3>
+            <svg
+              width="18"
+              height="18"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
+              ></path>
+            </svg>
+            Nhật ký MQTT & Trợ lý giọng nói
+          </h3>
+          <span
+            id="consoleToggleArrow"
+            style="font-size: 0.8rem; color: var(--text-secondary)"
+            >▼ Thu gọn</span
+          >
+        </div>
+        <div class="console-body" id="consoleBody">
+          <!-- Live log stream -->
+        </div>
+      </section>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- MODALS -->
+    <!-- ========================================== -->
+
+    <!-- 1. MQTT Config Modal -->
+    <div class="modal-overlay" id="mqttModal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Cấu hình MQTT Broker</h3>
+          <button class="modal-close-btn" onclick="closeModal('mqttModal')">
+            &times;
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="brokerUrlInput">Địa chỉ WebSocket Broker</label>
+            <input
+              id="brokerUrlInput"
+              class="form-control"
+              type="text"
+              placeholder="ws://localhost:9001"
+            />
+            <div
+              style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px"
+            >
+              <button
+                type="button"
+                class="btn btn-sm"
+                onclick="setQuickBroker('ws://localhost:9001')"
+              >
+                📍 ws://localhost:9001
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                onclick="setQuickBroker('ws://127.0.0.1:9001')"
+              >
+                📍 ws://127.0.0.1:9001
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                onclick="setQuickBroker('ws://10.251.10.110:9001')"
+              >
+                📱 ws://10.251.10.110:9001
+              </button>
+            </div>
+            <small
+              style="
+                color: var(--text-muted);
+                font-size: 0.78rem;
+                margin-top: 6px;
+                display: block;
+              "
+            >
+              💡 <strong>Mẹo:</strong> Nếu mở web trên cùng máy tính chạy
+              Mosquitto, dùng <code>ws://localhost:9001</code>. Nếu mở từ điện
+              thoại, dùng <code>ws://10.251.10.110:9001</code>.
+            </small>
+          </div>
+          <div style="font-size: 0.85rem; margin-top: 4px">
+            Trạng thái hiện tại:
+            <strong id="modalBrokerStatus" class="dang-ket-noi"
+              >Đang kết nối...</strong
+            >
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" onclick="closeModal('mqttModal')">Hủy</button>
+          <button class="btn btn-primary" onclick="handleSaveBrokerConfig()">
+            Lưu & Kết nối lại
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Add Device Modal -->
+    <div class="modal-overlay" id="addDeviceModal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Thêm Thiết Bị Mới</h3>
+          <button
+            class="modal-close-btn"
+            onclick="closeModal('addDeviceModal')"
+          >
+            &times;
+          </button>
+        </div>
+        <form id="addDeviceForm" onsubmit="handleAddDeviceSubmit(event)">
+          <div class="modal-body">
+            <div class="form-group">
+              <label for="newDevName">Tên thiết bị</label>
+              <input
+                id="newDevName"
+                class="form-control"
+                type="text"
+                placeholder="VD: Đèn trần, Quạt trần..."
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="newDevType">Loại thiết bị</label>
+              <select id="newDevType" class="form-control">
+                <option value="switch">Công tắc / Relay (On/Off)</option>
+                <option value="rgb">Đèn LED RGB (Đổi màu & Độ sáng)</option>
+                <option value="fan">Quạt (Cấp độ gió)</option>
+                <option value="sensor">Cảm biến Môi trường (Nhiệt/Ẩm)</option>
+                <option value="button">Nút ấn Kích hoạt (Macro Button)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="newDevRoom">Khu vực</label>
+              <select id="newDevRoom" class="form-control">
+                <!-- Dynamically populated -->
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="newDevPub">Topic gửi (Publish Topic)</label>
+              <input
+                id="newDevPub"
+                class="form-control"
+                type="text"
+                placeholder="VD: esp32/relay1 hoặc esp32/led"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="newDevSub"
+                >Topic nhận phản hồi (Subscribe Topic)</label
+              >
+              <input
+                id="newDevSub"
+                class="form-control"
+                type="text"
+                placeholder="VD: esp32/relay1_status (tùy chọn)"
+              />
+            </div>
+            <div class="form-group">
+              <label for="newDevPayload">Lệnh gửi khi Bật (Payload ON)</label>
+              <input
+                id="newDevPayload"
+                class="form-control"
+                type="text"
+                placeholder="Mặc định: ON"
+                value="ON"
+              />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button
+              type="button"
+              class="btn"
+              onclick="closeModal('addDeviceModal')"
+            >
+              Hủy
+            </button>
+            <button type="submit" class="btn btn-primary">Tạo thiết bị</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 4. Edit Device Modal -->
+    <div class="modal-overlay" id="editDeviceModal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Chỉnh sửa thiết bị</h3>
+          <button
+            class="modal-close-btn"
+            type="button"
+            onclick="closeModal('editDeviceModal')"
+          >
+            &times;
+          </button>
+        </div>
+        <form id="editDeviceForm" onsubmit="handleEditDeviceSubmit(event)">
+          <div class="modal-body">
+            <div class="form-group">
+              <label for="editDevName">Tên thiết bị</label>
+              <input
+                id="editDevName"
+                class="form-control"
+                type="text"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="editDevRoom">Khu vực</label>
+              <select id="editDevRoom" class="form-control"></select>
+            </div>
+            <div class="form-group">
+              <label for="editDevPub">Topic gửi (Publish Topic)</label>
+              <input
+                id="editDevPub"
+                class="form-control"
+                type="text"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="editDevSub"
+                >Topic nhận phản hồi (Subscribe Topic)</label
+              >
+              <input id="editDevSub" class="form-control" type="text" />
+            </div>
+            <div class="form-group">
+              <label for="editDevPayload">Lệnh gửi khi bật</label>
+              <input
+                id="editDevPayload"
+                class="form-control"
+                type="text"
+                placeholder="Để trống để giữ nguyên"
+              />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button
+              type="button"
+              class="btn"
+              onclick="closeModal('editDeviceModal')"
+            >
+              Hủy
+            </button>
+            <button type="submit" class="btn btn-primary">Lưu thay đổi</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 5. Add Room Modal -->
+    <div class="modal-overlay" id="addRoomModal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Thêm Phòng Mới</h3>
+          <button class="modal-close-btn" onclick="closeModal('addRoomModal')">
+            &times;
+          </button>
+        </div>
+        <form onsubmit="handleAddRoomSubmit(event)">
+          <div class="modal-body">
+            <div class="form-group">
+              <label for="newRoomName">Tên phòng / Khu vực</label>
+              <input
+                id="newRoomName"
+                class="form-control"
+                type="text"
+                placeholder="VD: Phòng làm việc, Ban công..."
+                required
+              />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button
+              type="button"
+              class="btn"
+              onclick="closeModal('addRoomModal')"
+            >
+              Hủy
+            </button>
+            <button type="submit" class="btn btn-primary">Thêm phòng</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Toast Notifications Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Script Application Logic -->
+    <script src="rgb.js"></script>
+  </body>
+</html>
