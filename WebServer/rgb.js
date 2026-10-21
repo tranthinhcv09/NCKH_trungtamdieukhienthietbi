@@ -1,11 +1,3 @@
-/**
- * SMART HOME DASHBOARD - CORE CONTROLLER & MQTT ENGINE
- * Handles user-configured devices, MQTT, voice control, and dashboard UI.
- */
-
-// ==========================================
-// 1. USER DATA & STATE MANAGEMENT
-// ==========================================
 
 function readStoredArray(key) {
   try {
