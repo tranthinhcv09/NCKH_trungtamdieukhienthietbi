@@ -918,6 +918,54 @@ void handleUart() {
           audio.connecttospeech("bật quạt", "vi");
         }
       }
+      else if (dataIn.startsWith("WiT LiT")) {
+        if (!isRecording) {
+            Serial.println("🔊 bật đèn màu trắng");
+            audio.connecttospeech("bật đèn màu trắng", "vi");
+        }
+      }
+      else if (dataIn.startsWith("GRmN LiT")) {
+          if (!isRecording) {
+              Serial.println("🔊 bật đèn màu xanh lá");
+              audio.connecttospeech("bật đèn màu xanh lá", "vi");
+          }
+      }
+      else if (dataIn.startsWith("RfD LiT")) {
+          if (!isRecording) {
+              Serial.println("🔊 bật đèn màu đỏ");
+              audio.connecttospeech("bật đèn màu đỏ", "vi");
+          }
+      }
+      else if (dataIn.startsWith("BLo LiT")) {
+          if (!isRecording) {
+              Serial.println("🔊 bật đèn màu xanh dương");
+              audio.connecttospeech("bật đèn màu xanh dương", "vi");
+          }
+      }
+      else if (dataIn.startsWith("YfLb LiT")) {
+          if (!isRecording) {
+              Serial.println("🔊 bật đèn màu vàng");
+              audio.connecttospeech("bật đèn màu vàng", "vi");
+          }
+      }
+      else if (dataIn.startsWith("eRcNq LiT")) {
+          if (!isRecording) {
+              Serial.println("🔊 bật đèn màu cam");
+              audio.connecttospeech("bật đèn màu cam", "vi");
+          }
+      }
+      else if (dataIn.startsWith("PglK LiT")) {
+          if (!isRecording) {
+              Serial.println("🔊 bật đèn màu tím");
+              audio.connecttospeech("bật đèn màu tím", "vi");
+          }
+      }
+      else if (dataIn.startsWith("PkPcL LiT")) {
+          if (!isRecording) {
+              Serial.println("🔊 bật đèn màu hồng");
+              audio.connecttospeech("bật đèn màu hồng", "vi");
+          }
+      }
     }
   }
 }
