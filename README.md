@@ -1,6 +1,6 @@
 # NCKH_trungtamdieukhienthietbi
 
-WebServer: https://tranthinhcv09.github.io/webserver_nckh/ 
+WebServer: https://tranthinhcv09.github.io/webserver_nckh/ (đang thử nghiệm)
 
 Danh sách câu lệnh:
   1. have a question
