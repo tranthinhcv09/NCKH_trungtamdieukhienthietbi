@@ -4,7 +4,6 @@
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
-#include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
 #include "DHT.h"
 #include <esp_wifi.h>
@@ -26,17 +25,12 @@ typedef struct {
 } WifiMessagePacket;
 
 // ===== DHT11 CONFIG =====
-#define DHTPIN  4
+#define DHTPIN  13
 #define DHTTYPE DHT11
 DHT dht(DHTPIN, DHTTYPE);
 
-// ===== LED RGB tích hợp ESP32-S3 (chân 48) =====
-#define LED_PIN   48
-#define NUMPIXELS 1
-Adafruit_NeoPixel pixels(NUMPIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
-
-// ===== NÚT BẤM DÙNG CHUNG (GPIO 0) =====
-#define btnPin   0
+// ===== NÚT BẤM DÙNG CHUNG (GPIO 15) =====
+#define btnPin   15
 #define PUSHTIME 5000
 
 // ===== TOPICS MQTT =====
@@ -47,13 +41,18 @@ const char* pub_topic = "esp32/send";
 uint8_t wifiPeerAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // ===== TIMING & VARIABLES =====
-const uint8_t       MQTT_MAX_RETRIES         = 30;
-const unsigned long MQTT_RETRY_INTERVAL_MS   = 5000;
-const unsigned long DHT_READ_INTERVAL_MS     = 60000;
-const unsigned long DHT_MIN_INTERVAL_MS      = 2000;
-const unsigned long ESPNOW_RETRY_INTERVAL_MS = 10000;
+const uint8_t       MQTT_MAX_RETRIES           = 30;
+const unsigned long MQTT_RETRY_INTERVAL_MS     = 5000;
+const unsigned long DHT_READ_INTERVAL_MS       = 6000;
+const unsigned long DHT_MIN_INTERVAL_MS        = 2000;
+const unsigned long ESPNOW_RETRY_INTERVAL_MS   = 10000;
 const unsigned long WIFI_BROADCAST_INTERVAL_MS = 500;
-const unsigned long STA_RECONNECT_DELAY_MS   = 2000;
+const unsigned long STA_RECONNECT_DELAY_MS     = 2000;
+
+// ===== KÊNH ESP-NOW KHI KHÔNG CÓ WIFI (PHẢI TRÙNG ESP_NOW_OFFLINE_CHANNEL BÊN ESP32-S3) =====
+#define ESPNOW_OFFLINE_CHANNEL 1
+const unsigned long WIFI_RETRY_INTERVAL_MS  = 120000; // dò lại router mỗi 120s khi offline (0 = tắt)
+const unsigned long WIFI_ATTEMPT_TIMEOUT_MS = 5000;   // mỗi lần thử tối đa 5s rồi về kênh offline
 
 unsigned long lastMqttAttempt    = 0;
 unsigned long lastEspNowSend     = 0;
@@ -83,10 +82,18 @@ bool espNowReady          = false;
 volatile bool staReconnectPending = false;
 unsigned long staDisconnectTime   = 0;
 
+// ---- Quản lý WiFi khi offline (không cho STA dò kênh liên tục) ----
+volatile bool    staConnecting     = false;  // đang thử nối router
+volatile bool    staAttemptFailed  = false;  // event báo thử nối thất bại
+volatile uint8_t lastRouterChannel = 0;      // kênh router lần nối thành công gần nhất
+unsigned long    staConnectStart   = 0;
+unsigned long    lastWifiRetry     = 0;
+unsigned long    lastChannelCheck  = 0;
+
 volatile bool wifiReconnectRequested = false;
 
-volatile bool          pendingWifiUpdate = false;
-WifiMessagePacket       pendingWifiPacket;
+volatile bool      pendingWifiUpdate = false;
+WifiMessagePacket  pendingWifiPacket;
 
 volatile bool pendingTextAvailable = false;
 char          pendingTextBuffer[240];
@@ -100,25 +107,20 @@ bool          longPressTriggered = false;
 // ---- WiFi scan bất đồng bộ ----
 bool wifiScanTriggered = false;
 
-// ============================================================
-// LED Helpers
-// ============================================================
-void setLEDColor(uint8_t r, uint8_t g, uint8_t b) {
-    pixels.setPixelColor(0, pixels.Color(r, g, b));
-    pixels.show();
-}
-void ledOff() { pixels.clear(); pixels.show(); }
-void RED()    { setLEDColor(255, 0, 0); }
-void GREEN()  { setLEDColor(0, 255, 0); }
-void BLUE()   { setLEDColor(0, 0, 255); }
-void PURPLE() { setLEDColor(255, 0, 255); }
+// Dummy LED functions (nếu bạn dùng LED RGB phần cứng, thêm code điều khiển vào đây)
+void GREEN() {}
+void RED() {}
+void PURPLE() {}
+void BLUE() {}
+void ledOff() {}
+void setLEDColor(uint8_t r, uint8_t g, uint8_t b) {}
 
 // ============================================================
 // Prototypes
 // ============================================================
 void processIncomingText(String message, String source);
 bool sendEspNowText(String text);
-bool sendWifiCredentialsChannel1();
+bool sendWifiCredentials();
 void sendText(const char* topic, String text);
 void sendTextdht(const char* topic, String text);
 void applyWifiCredentials(const char* newSsid, const char* newPass, const char* newMqtt);
@@ -128,49 +130,77 @@ void setupWebServer();
 void checkButton();
 bool setupEspNow();
 void reconnectMQTT();
-bool forceEspNowChannel(uint8_t channel);
+void lockEspNowChannel();
+void manageOfflineWifi();
 
 // ============================================================
-// ÉP KÊNH RF CHO ESP-NOW (có log + kiểm tra lỗi)
+// KHOÁ KÊNH ESP-NOW KHI KHÔNG CÓ ROUTER
 // ============================================================
-bool forceEspNowChannel(uint8_t channel) {
-    if (WiFi.status() == WL_CONNECTED) {
-        // QUAN TRỌNG: wifioff PHẢI là false. Nếu để true, WiFi.disconnect()
-        // sẽ dừng luôn driver WiFi (esp_wifi_stop()) -> ESP-NOW tự động bị
-        // deinit theo. Ở đây ta chỉ cần rời AP (disassociate) để mở khoá
-        // kênh, không được tắt driver.
-        WiFi.disconnect(false, false);
-        delay(100);
+void lockEspNowChannel() {
+    if (WiFi.status() == WL_CONNECTED || staConnecting) return;
+    uint8_t ch = 0;
+    wifi_second_chan_t sc;
+    esp_wifi_get_channel(&ch, &sc);
+    if (ch != ESPNOW_OFFLINE_CHANNEL) {
+        esp_wifi_set_channel(ESPNOW_OFFLINE_CHANNEL, WIFI_SECOND_CHAN_NONE);
+        Serial.printf("🔒 Offline: ép ESP-NOW về kênh %d (đang ở kênh %d)\n", ESPNOW_OFFLINE_CHANNEL, ch);
     }
-    WiFi.mode(WIFI_STA);
-    esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-    if (err == ESP_OK) {
-        Serial.printf("📡 Đã ép kênh RF sang Kênh %d thành công.\n", channel);
-    } else {
-        Serial.printf("❌ LỖI ép kênh sang %d! esp_err_t = %d (0x%X)\n", channel, err, err);
+}
+
+// Gọi trong loop(): giữ kênh cố định khi offline, chỉ thỉnh thoảng thử nối lại router
+void manageOfflineWifi() {
+    if (wifiBroadcastEnabled) return;                       // đang phát config: giữ nguyên
+    if (WiFi.status() == WL_CONNECTED) { staConnecting = false; return; }
+
+    unsigned long now = millis();
+
+    if (staConnecting) {
+        if (staAttemptFailed || now - staConnectStart > WIFI_ATTEMPT_TIMEOUT_MS) {
+            staConnecting    = false;
+            staAttemptFailed = false;
+            WiFi.disconnect(false, false);                  // dừng dò kênh
+            Serial.println("📴 Chưa có router -> về kênh ESP-NOW offline");
+            lockEspNowChannel();
+        }
+        return;
     }
-    return (err == ESP_OK);
+
+    if (now - lastChannelCheck >= 1000) {
+        lastChannelCheck = now;
+        lockEspNowChannel();
+    }
+
+    if (WIFI_RETRY_INTERVAL_MS > 0 && ssid.length() > 0 &&
+        now - lastWifiRetry >= WIFI_RETRY_INTERVAL_MS) {
+        lastWifiRetry    = now;
+        staAttemptFailed = false;
+        staConnectStart  = now;
+        staConnecting    = true;
+        Serial.println("🔁 Offline: thử nối lại router...");
+        if (lastRouterChannel) WiFi.begin(ssid.c_str(), password.c_str(), lastRouterChannel);
+        else                   WiFi.begin(ssid.c_str(), password.c_str());
+    }
 }
 
 // ============================================================
-// PHÁT CẤU HÌNH WIFI CỐ ĐỊNH TRÊN KÊNH 1
+// PHÁT CẤU HÌNH WIFI TRÊN KÊNH HIỆN TẠI
 // ============================================================
-bool sendWifiCredentialsChannel1() {
+bool sendWifiCredentials() {
     if (!espNowReady) return false;
 
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, wifiPeerAddress, 6);
-    peerInfo.channel = 0; // 0 = dùng kênh RF hiện tại (đã ép = 1)
+    peerInfo.channel = 0; // 0 = dùng chung kênh RF hiện tại của WiFi
     peerInfo.encrypt = false;
     esp_now_mod_peer(&peerInfo);
 
-    WifiMessagePacket pkt;
+    WifiMessagePacket pkt = {};
     pkt.type = MSG_TYPE_WIFI;
     ssid.toCharArray(pkt.ssid, sizeof(pkt.ssid));
     password.toCharArray(pkt.password, sizeof(pkt.password));
     mqtt_server.toCharArray(pkt.mqtt_server, sizeof(pkt.mqtt_server));
 
-    Serial.printf("📡 [ESPNOW SEND Ch1] SSID: '%s' | PASS: '%s' | MQTT: '%s' | Kênh RF hiện tại: %d\n",
+    Serial.printf("📡 [ESPNOW SEND] SSID: '%s' | PASS: '%s' | MQTT: '%s' | Kênh RF: %d\n",
                   pkt.ssid, pkt.password, pkt.mqtt_server, WiFi.channel());
 
     esp_err_t result = esp_now_send(wifiPeerAddress, (uint8_t *)&pkt, sizeof(pkt));
@@ -207,7 +237,7 @@ void sendTextdht(const char* topic, String text) {
         mqttClient.publish(topic, text.c_str());
         Serial.println("📤 [MQTT Fallback Sent]: " + text);
     } else {
-        Serial.println("❌ Gửi thất bại: MQTT!");
+        Serial.println("❌ Gửi thất bại: MQTT không kết nối!");
     }
 }
 
@@ -217,32 +247,38 @@ void sendTextdht(const char* topic, String text) {
 bool sendEspNowText(String text) {
     if (!espNowReady) return false;
 
-    TextMessagePacket pkt;
+    TextMessagePacket pkt = {};
     pkt.type = MSG_TYPE_TEXT;
     text.toCharArray(pkt.text, sizeof(pkt.text));
 
     esp_err_t result = esp_now_send(wifiPeerAddress, (uint8_t *)&pkt, sizeof(pkt));
+    Serial.printf("ESP-NOW send=%d | kênh RF=%d\n", result, WiFi.channel());
     return (result == ESP_OK);
 }
 
-void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingData, int len) {
+void OnDataRecv(const esp_now_recv_info *info, const uint8_t *data, int len) {
     if (len < 1) return;
-    uint8_t type = incomingData[0];
+    uint8_t type = data[0];
+    const uint8_t *m = info->src_addr;
 
-    if (type == MSG_TYPE_TEXT && len == sizeof(TextMessagePacket)) {
-        TextMessagePacket pkt;
-        memcpy(&pkt, incomingData, sizeof(pkt));
-        strncpy(pendingTextBuffer, pkt.text, sizeof(pendingTextBuffer) - 1);
-        pendingTextBuffer[sizeof(pendingTextBuffer) - 1] = '\0';
-        pendingTextSource   = "ESP-NOW";
+    if (type == MSG_TYPE_TEXT && len >= 2) {
+        // Chấp nhận mọi độ dài: chỉ lấy phần text sau byte type
+        size_t n = min((size_t)(len - 1), sizeof(pendingTextBuffer) - 1);
+        memcpy(pendingTextBuffer, data + 1, n);
+        pendingTextBuffer[n] = '\0';
+        pendingTextSource    = "ESP-NOW";
         pendingTextAvailable = true;
 
     } else if (type == MSG_TYPE_WIFI && len == sizeof(WifiMessagePacket)) {
-        memcpy(&pendingWifiPacket, incomingData, sizeof(pendingWifiPacket));
+        memcpy(&pendingWifiPacket, data, sizeof(pendingWifiPacket));
+        // Đảm bảo chuỗi luôn kết thúc bằng '\0'
+        pendingWifiPacket.ssid[sizeof(pendingWifiPacket.ssid) - 1]               = '\0';
+        pendingWifiPacket.password[sizeof(pendingWifiPacket.password) - 1]       = '\0';
+        pendingWifiPacket.mqtt_server[sizeof(pendingWifiPacket.mqtt_server) - 1] = '\0';
         pendingWifiUpdate = true;
 
     } else {
-        Serial.printf("⚠️ Gói ESP-NOW không xác định (type=0x%02X, len=%d)\n", type, len);
+        Serial.println("⚠️ Gói ESP-NOW không xác định -> bỏ qua");
     }
 }
 
@@ -269,6 +305,7 @@ void applyWifiCredentials(const char* newSsid, const char* newPass, const char* 
 
 bool setupEspNow() {
     esp_now_deinit();
+    esp_wifi_set_ps(WIFI_PS_NONE);   // tắt modem-sleep: tránh lỡ gói ESP-NOW
 
     if (esp_now_init() != ESP_OK) {
         Serial.println("❌ ESP-NOW init thất bại!");
@@ -279,7 +316,7 @@ bool setupEspNow() {
 
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, wifiPeerAddress, 6);
-    peerInfo.channel = 0; // Sử dụng kênh RF hiện tại
+    peerInfo.channel = 0; // Tự động đồng bộ theo Kênh hiện tại
     peerInfo.encrypt = false;
 
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
@@ -294,20 +331,21 @@ void setupWifi() {
     ssid.trim();
     password.trim();
 
-    espNowReady = false;
+    espNowReady      = false;
+    staConnecting    = false;
+    staAttemptFailed = false;
+
+    // Tự quản lý việc nối lại: tắt autoReconnect để STA không dò kênh liên tục
+    WiFi.setAutoReconnect(false);
 
     if (ssid.length() > 0) {
         Serial.println("=== WIFI DEBUG INFO ===");
         Serial.println("SSID: '" + ssid + "' (length: " + String(ssid.length()) + ")");
 
         WiFi.mode(WIFI_STA);
-        // [FIX 5] KHÔNG dùng WiFi.disconnect(true) — sẽ dừng luôn driver
-        // WiFi (esp_wifi_stop()) và làm hỏng ESP-NOW. Chỉ rời AP hiện tại.
         WiFi.disconnect(false, false);
         delay(100);
 
-        // [FIX 4] KHÔNG gọi WiFi.onEvent() ở đây nữa — đã đăng ký 1 lần
-        // duy nhất trong setup(), tránh đăng ký trùng gây sự kiện bị bắn 2 lần.
         WiFi.begin(ssid.c_str(), password.c_str());
 
         unsigned long startTime = millis();
@@ -318,21 +356,27 @@ void setupWifi() {
         Serial.println();
 
         if (WiFi.status() == WL_CONNECTED) {
+            esp_wifi_set_ps(WIFI_PS_NONE);
             wifiMode = 1;
+            lastRouterChannel = WiFi.channel();
             espNowReady = setupEspNow();
             return;
         }
         Serial.println("❌ Không kết nối được mạng đã lưu -> chuyển sang AP mode.");
+        WiFi.disconnect(false, false);   // dừng STA dò kênh trước khi sang AP
     }
 
-    // Chuyển sang WIFI_AP_STA để ESP-NOW vẫn chạy được song song với Access Point
+    // Chế độ AP: Phát AP cố định kênh offline (trùng kênh ESP-NOW)
     WiFi.mode(WIFI_AP_STA);
     uint8_t macAddr[6];
     WiFi.softAPmacAddress(macAddr);
     String ssid_ap = "TDTHINH-" + String(macAddr[4], HEX) + String(macAddr[5], HEX);
     ssid_ap.toUpperCase();
-    WiFi.softAP(ssid_ap.c_str(), NULL, 10);
-    wifiMode = 0;
+    
+    WiFi.softAP(ssid_ap.c_str(), NULL, ESPNOW_OFFLINE_CHANNEL, 0);
+    esp_wifi_set_channel(ESPNOW_OFFLINE_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    wifiMode      = 0;
+    lastWifiRetry = millis();
 
     Serial.println("========================================");
     Serial.println("📶 ĐANG PHÁT ACCESS POINT ĐỂ CẤU HÌNH:");
@@ -372,13 +416,13 @@ void processIncomingText(String message, String source) {
         return;
     }
 
-    if (message == "TkN nN jc LiTS") {
-        sendText(pub_rgb, "ONRGB");
+    if (message == "TkN nN jc LiTS" || message == "to_on") {
+        sendTextdht(pub_rgb, "ONRGB");
         GREEN();
         return;
-    } else if (message == "TkN eF jc LiTS" || message == "eF LiT") {
+    } else if (message == "TkN eF jc LiTS" || message == "eF LiT" || message == "to_off") {
         ledOff();
-        sendText(pub_rgb, "OFFRGB");
+        sendTextdht(pub_rgb, "OFFRGB");
         return;
     } else if (message == "GRmN LiT") {
         GREEN();
@@ -388,6 +432,21 @@ void processIncomingText(String message, String source) {
         return;
     } else if (message == "BLo LiT") {
         BLUE();
+        return;
+    } else if (message == "fan_off") {
+        sendTextdht("esp32/fan", "fan_off");
+        return;
+    } else if (message == "fan_on_50" || message == "fan_speed_50") {
+        sendTextdht("esp32/fan", "fan_on_50");
+        return;
+    } else if (message == "fan_on_25" || message == "fan_speed_25") {
+        sendTextdht("esp32/fan", "fan_on_25");
+        return;
+    } else if (message == "fan_on_75" || message == "fan_speed_75") {
+        sendTextdht("esp32/fan", "fan_on_75");
+        return;
+    } else if (message == "fan_on_100" || message == "fan_speed_100") {
+        sendTextdht("esp32/fan", "fan_on_100");
         return;
     }
 
@@ -403,7 +462,7 @@ void processIncomingText(String message, String source) {
         return;
     }
 
-    sendText(pub_topic, "ACK from ESP32-S3: " + message);
+    sendText(pub_topic, "ACK from ESP32 DevKit: " + message);
 }
 
 // ============================================================
@@ -418,7 +477,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void reconnectMQTT() {
-    if (mqttClient.connect("ESP32_S3_DHT_MASTER")) {
+    if (mqttClient.connect("ESP32_DevKit_DHT_MASTER")) {
         mqttClient.subscribe(sub_topic, 1);
         mqttFailedAttempts = 0;
         Serial.println("✅ MQTT connected!");
@@ -435,19 +494,25 @@ void reconnectMQTT() {
 // ============================================================
 void WiFiEvent(WiFiEvent_t event) {
     switch (event) {
-        case IP_EVENT_STA_GOT_IP:
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            esp_wifi_set_ps(WIFI_PS_NONE);  
             Serial.println("✅ Connected to WiFi, IP: " + WiFi.localIP().toString());
             Serial.printf("📡 Wi-Fi Channel hiện tại: %d\n", WiFi.channel());
             wifiMode = 1;
             wifiRetryCount = 0;
             staReconnectPending = false;
+            staConnecting       = false;
+            lastRouterChannel   = WiFi.channel();
             GREEN();
             break;
-        case WIFI_EVENT_STA_DISCONNECTED:
-            Serial.println("⚠️ WiFi STA bị rớt kết nối, sẽ thử lại...");
-            wifiMode = 2;
-            staReconnectPending = true;
-            staDisconnectTime   = millis();
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            if (staConnecting) {
+                staAttemptFailed = true;      // lần thử nối lại thất bại -> loop() sẽ về kênh offline
+            } else if (wifiMode == 1) {
+                Serial.println("⚠️ WiFi STA bị rớt -> chuyển sang kênh ESP-NOW offline");
+                wifiMode      = 2;
+                lastWifiRetry = millis();     // lần dò lại đầu tiên sau WIFI_RETRY_INTERVAL_MS
+            }
             break;
         default:
             break;
@@ -455,7 +520,7 @@ void WiFiEvent(WiFiEvent_t event) {
 }
 
 // ============================================================
-// WEB SERVER  —  KHÔNG YÊU CẦU ĐĂNG NHẬP (theo yêu cầu)
+// WEB SERVER
 // ============================================================
 void setupWebServer() {
     if (webServerStarted) return;
@@ -485,7 +550,7 @@ void setupWebServer() {
     </head>
     <body>
         <div class="card">
-        <h3>CẤU HÌNH ESP32-S3</h3>
+        <h3>CẤU HÌNH ESP32 DEVKIT V1</h3>
         <p id="info">Đang quét mạng WiFi...</p>
 
         <label>Tên WiFi (SSID):</label>
@@ -650,9 +715,6 @@ void setupWebServer() {
         webServer.send(200, "application/json", json);
     });
 
-    // [FIX 2] /saveWifi giờ lưu vào Preferences (NVS) — CÙNG kho lưu trữ
-    // mà setup() đọc ra khi khởi động lại — và cập nhật ngay biến toàn cục
-    // ssid/password/mqtt_server trong RAM, khớp với applyWifiCredentials().
     webServer.on("/saveWifi", HTTP_GET, []() {
         if (webServer.hasArg("ssid")) {
             ssid        = webServer.arg("ssid");
@@ -679,12 +741,11 @@ void setupWebServer() {
     });
 
     webServer.on("/reStart", HTTP_GET, []() {
-        webServer.send(200, "text/plain", "Đang khởi động lại ESP32-S3...");
+        webServer.send(200, "text/plain", "Đang khởi động lại ESP32 DevKit V1...");
         delay(1000);
         ESP.restart();
     });
 
-    // Hỗ trợ captive portal: mọi route lạ redirect về "/"
     webServer.onNotFound([]() {
         webServer.sendHeader("Location", "/", true);
         webServer.send(302, "text/plain", "");
@@ -692,11 +753,11 @@ void setupWebServer() {
 
     webServer.begin();
     webServerStarted = true;
-    Serial.println("🌐 Web Server Config đã sẵn sàng (không cần đăng nhập)!");
+    Serial.println("🌐 Web Server Config đã sẵn sàng!");
 }
 
 // ============================================================
-// NÚT BẤM DÙNG CHUNG (GPIO 0)
+// NÚT BẤM DÙNG CHUNG (GPIO 15) - ĐÃ ĐƠN GIẢN HÓA TRÊN 1 KÊNH
 // ============================================================
 void checkButton() {
     bool reading = (digitalRead(btnPin) == LOW);
@@ -730,13 +791,11 @@ void checkButton() {
                     wifiBroadcastEnabled = false;
                 } else {
                     PURPLE();
-                    Serial.println("\n📡 [NÚT BẤM] BẬT PHÁT WiFi Config qua ESP-NOW (Cố định Kênh 1)!");
-                    forceEspNowChannel(1);
+                    Serial.println("\n📡 [NÚT BẤM] BẬT PHÁT WiFi Config qua ESP-NOW!");
                 }
             } else {
                 GREEN();
                 Serial.println("\n🛑 [NÚT BẤM] TẮT PHÁT WiFi Config -> Trở về bình thường");
-                wifiReconnectRequested = true;
             }
         }
     }
@@ -751,7 +810,6 @@ void setup() {
 
     dht.begin();
 
-    // Đăng ký sự kiện WiFi DUY NHẤT 1 lần ở đây (không lặp lại trong setupWifi()).
     WiFi.onEvent(WiFiEvent);
 
     preferences.begin("config", true);
@@ -761,13 +819,8 @@ void setup() {
     preferences.end();
 
     setupWifi();
-
-    // [FIX 1 - LỖI CHÍNH] Gọi setupWebServer() LUÔN LUÔN, dù đang ở STA
-    // hay AP mode — trước đây hàm này không hề được gọi trong setup().
     setupWebServer();
 
-    pixels.begin();
-    pixels.setBrightness(50);
     RED();
 
     mqtt_server.toCharArray(mqttServerBuf, sizeof(mqttServerBuf));
@@ -784,7 +837,7 @@ void setup() {
     Serial.println(WiFi.macAddress());
 
     GREEN();
-    Serial.println("🚀 Hệ thống DHT11 & Text Hub đã sẵn sàng!");
+    Serial.println("🚀 Hệ thống DHT11 & Text Hub trên ESP32 DevKit V1 đã sẵn sàng!");
     lastDhtRead = millis();
 }
 
@@ -801,17 +854,7 @@ void loop() {
         applyWifiCredentials(pendingWifiPacket.ssid, pendingWifiPacket.password, pendingWifiPacket.mqtt_server);
     }
 
-    if (!wifiBroadcastEnabled && staReconnectPending && millis() - staDisconnectTime > STA_RECONNECT_DELAY_MS) {
-        staReconnectPending = false;
-        wifiRetryCount++;
-        if (wifiRetryCount > 10) {
-            Serial.println("⚠️ Thử kết nối lại thất bại quá 10 lần! Chuyển về AP Mode...");
-            wifiRetryCount = 0;
-            setupWifi();
-        } else {
-            WiFi.begin(ssid.c_str(), password.c_str());
-        }
-    }
+    manageOfflineWifi();   // giữ kênh ESP-NOW cố định khi mất router, dò lại thưa
 
     if (!wifiBroadcastEnabled && wifiReconnectRequested) {
         wifiReconnectRequested = false;
@@ -823,13 +866,15 @@ void loop() {
         espNowReady = setupEspNow();
     }
 
+    // Gửi cấu hình định kỳ khi cờ wifiBroadcastEnabled được BẬT bằng nút bấm
     if (wifiBroadcastEnabled && ssid.length() > 0 &&
         millis() - lastEspNowSend >= WIFI_BROADCAST_INTERVAL_MS) {
         lastEspNowSend = millis();
-        sendWifiCredentialsChannel1();
+        sendWifiCredentials();
     }
 
-    if (!wifiBroadcastEnabled && wifiMode == 1) {
+    // Xử lý kết nối MQTT khi ở chế độ STA thành công
+    if (wifiMode == 1) {
         if (!mqttClient.connected() && millis() - lastMqttAttempt > MQTT_RETRY_INTERVAL_MS) {
             lastMqttAttempt = millis();
             reconnectMQTT();
@@ -837,7 +882,8 @@ void loop() {
         mqttClient.loop();
     }
 
-    if (!wifiBroadcastEnabled && (millis() - lastDhtRead >= DHT_READ_INTERVAL_MS)) {
+    // Đọc cảm biến DHT11 định kỳ
+    if (millis() - lastDhtRead >= DHT_READ_INTERVAL_MS) {
         lastDhtRead = millis();
         float t = dht.readTemperature();
         float h = dht.readHumidity();
@@ -846,7 +892,7 @@ void loop() {
             String tempStr = "DHT11 -> Temp: " + String(t, 1) + "C | Hum: " + String(h, 1) + "%";
             sendTextdht("esp32/dht", tempStr);
         } else {
-            Serial.println("❌ Lỗi đọc DHT11 định kỳ, sẽ thử lại ở chu kỳ sau (10s)");
+            Serial.println("❌ Lỗi đọc DHT11 định kỳ, sẽ thử lại ở chu kỳ sau");
         }
     }
 
